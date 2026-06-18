@@ -1,0 +1,343 @@
+{
+  "name": "Social Media HITL Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "social-media-form",
+        "formTitle": "Social Media Post Request",
+        "formDescription": "Enter a post topic and scheduled publish time. The workflow will generate copy, composite a brand image, and send it for human approval before publishing.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "topic",
+              "placeholder": "e.g. How AI is transforming social media marketing",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "scheduled_at",
+              "placeholder": "e.g. 2026-06-21T10:00:00Z",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "63a9f55b-d52d-4d1f-bd6f-41c73ea61914",
+      "name": "Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        144
+      ],
+      "webhookId": "359e6bab-0144-442a-84ba-e2f1078f30d9",
+      "notes": "ENTRY POINT — Serves a web form at the workflow's production URL. The submitter enters a post topic and a scheduled publish time. These arrive in the next node as $json.topic and $json.scheduled_at."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── LLM Content Generation with Word-Count Enforcement (Groq) ─────────\n// Calls Groq API up to 5 times until copy is strictly 90-150 words.\n// Uses this.helpers.httpRequest() — the built-in n8n Code node HTTP helper.\n//\n// SETUP: Replace PASTE_YOUR_GROQ_API_KEY_HERE below with your actual key.\n// Get a free key at: https://console.groq.com -> API Keys\n\nconst MODEL       = 'llama-3.3-70b-versatile';\nconst MIN_WORDS   = 90;\nconst MAX_WORDS   = 150;\nconst MAX_RETRIES = 5;\n\nconst topic        = $input.first().json.topic;\nconst scheduled_at = $input.first().json.scheduled_at;\n\nconst apiKey = 'PASTE_YOUR_GROQ_API_KEY_HERE'; // ← paste your Groq key here\n\nif (!apiKey || apiKey === 'PASTE_YOUR_GROQ_API_KEY_HERE') {\n  throw new Error('Replace the apiKey value with your real Groq API key from console.groq.com (starts with gsk_).');\n}\n\nconst BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';\n\nconst messages = [\n  {\n    role: 'system',\n    content: `You are a professional social media copywriter. Write an engaging, brand-appropriate post. CRITICAL REQUIREMENT: Your response must be between ${MIN_WORDS} and ${MAX_WORDS} words — count your words before responding. Output ONLY the post text, no labels, hashtags, or metadata.`\n  },\n  {\n    role: 'user',\n    content: `Write a social media post about: ${topic}`\n  }\n];\n\nlet copy      = '';\nlet wordCount = 0;\nlet attempt   = 0;\n\nwhile (attempt < MAX_RETRIES) {\n  attempt++;\n\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: BASE_URL,\n    headers: {\n      'Authorization': `Bearer ${apiKey}`,\n      'Content-Type': 'application/json'\n    },\n    body: {\n      model: MODEL,\n      messages,\n      max_tokens: 400,\n      temperature: 0.7\n    },\n    json: true\n  });\n\n  copy      = response.choices[0].message.content.trim();\n  wordCount = copy.split(/\\s+/).filter(w => w.length > 0).length;\n\n  if (wordCount >= MIN_WORDS && wordCount <= MAX_WORDS) {\n    break;\n  }\n\n  if (attempt < MAX_RETRIES) {\n    messages.push({ role: 'assistant', content: copy });\n    messages.push({\n      role: 'user',\n      content: `Your previous draft was ${wordCount} words. Rewrite the full post to be between ${MIN_WORDS} and ${MAX_WORDS} words. Do not just trim — rewrite naturally so the post reads well and stays on topic.`\n    });\n\n    // Small delay to avoid rate limit on rapid retries\n    await new Promise(resolve => setTimeout(resolve, 500));\n  }\n}\n\nconst withinRange = wordCount >= MIN_WORDS && wordCount <= MAX_WORDS;\n\nif (!withinRange) {\n  throw new Error(\n    `Could not generate copy within ${MIN_WORDS}–${MAX_WORDS} words after ${attempt} attempts ` +\n    `(last draft: ${wordCount} words). Workflow stopped — re-run to retry.`\n  );\n}\n\nreturn [{\n  json: {\n    topic,\n    scheduled_at,\n    copy,\n    wordCount,\n    attempts: attempt,\n    withinRange\n  }\n}];\n"
+      },
+      "id": "d7f618b4-ab92-4255-b875-4dab9f12599c",
+      "name": "Generate Post Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        144
+      ],
+      "notes": "LLM GENERATION + RETRY — Calls Groq Llama 3.3 70B (free tier) with a system instruction enforcing 90-150 words. On each failed attempt, appends a corrective user turn telling the model its word count and asking for a full rewrite. STRICT: if still out of range after 5 attempts, the node throws and the workflow stops, so a non-compliant post can never reach approval or publishing. Returns: { topic, scheduled_at, copy, wordCount, attempts, withinRange }"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://8b51-103-101-54-179.ngrok-free.app/compose-image",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "title",
+              "value": "={{ $json.topic }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5e063065-6e8f-45da-a036-a8fcb8327cd0",
+      "name": "Compose Brand Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -960,
+        144
+      ],
+      "notes": "IMAGE COMPOSITING — POSTs the post topic to FastAPI /compose-image. FastAPI runs Pillow to overlay the topic text onto the brand card template at fixed pixel coordinates. Returns JSON: { image_url: '/output/abc123.png', image_path: '...' }. Replace REPLACE_WITH_NGROK_URL with your current ngrok URL."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://8b51-103-101-54-179.ngrok-free.app/request-approval",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "copy",
+              "value": "={{ $('Generate Post Content').first().json.copy }}"
+            },
+            {
+              "name": "image_url",
+              "value": "={{ $json.image_url }}"
+            },
+            {
+              "name": "resume_webhook_url",
+              "value": "={{ $execution.resumeUrl }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "892afe47-ec40-4f6d-9ae5-b77c10ebed09",
+      "name": "Request Human Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -720,
+        144
+      ],
+      "notes": "HITL REQUEST — Creates a pending review in FastAPI. The key field is resume_webhook_url = $execution.resumeUrl, which is n8n's auto-generated webhook URL for this exact execution. When the human clicks Approve/Edit/Reject in the dashboard, FastAPI POSTs to that URL, which resumes this paused execution. Returns: { review_id, review_url }."
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "id": "e1f4fe04-8184-4bae-942e-182a42b49898",
+      "name": "Wait for Human Decision",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        144
+      ],
+      "webhookId": "5017a795-98d1-4a85-b0a6-47b2b00b15e2",
+      "notes": "WORKFLOW PAUSE — n8n literally suspends this execution here. No polling, no CPU usage. The execution is stored on disk and resumed only when FastAPI POSTs the decision payload to $execution.resumeUrl. When resumed, the POST body ({ decision, final_copy, review_id }) becomes $json for the next node."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition-decision",
+              "leftValue": "={{ $json.body.decision }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5c383665-560f-401e-b82a-2cb0d1842e21",
+      "name": "Was Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        144
+      ],
+      "notes": "DECISION BRANCH — True output (top): publish to Facebook then Instagram. False output (bottom): log rejection and stop. The $json.decision value is 'approved' or 'rejected', sent by FastAPI when the human clicked a button on the review dashboard."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://8b51-103-101-54-179.ngrok-free.app/mock/facebook/post",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "image_url",
+              "value": "={{ 'https://8b51-103-101-54-179.ngrok-free.app' + $('Compose Brand Image').first().json.image_url }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.body.final_copy || $('Generate Post Content').first().json.copy }}"
+            },
+            {
+              "name": "scheduled_at",
+              "value": "={{ $('Generate Post Content').first().json.scheduled_at }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "140a641e-e354-47bd-b4a8-8f7e27a55e56",
+      "name": "Publish to Facebook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "MOCK FACEBOOK PUBLISH — Calls the FastAPI mock endpoint. Uses final_copy from the approval callback (which may be the human-edited version if the reviewer used Edit & Approve). The FastAPI server logs the full payload to the terminal — check your console to confirm it fired. Replace REPLACE_WITH_NGROK_URL in both the URL and the image_url value."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://8b51-103-101-54-179.ngrok-free.app/mock/instagram/post",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "image_url",
+              "value": "={{ 'https://8b51-103-101-54-179.ngrok-free.app' + $('Compose Brand Image').first().json.image_url }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $('Was Approved?').first().json.body.final_copy || $('Generate Post Content').first().json.copy }}"
+            },
+            {
+              "name": "scheduled_at",
+              "value": "={{ $('Generate Post Content').first().json.scheduled_at }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0e244b77-0e3b-40f1-a85a-6fb84b6c1339",
+      "name": "Publish to Instagram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        288
+      ],
+      "notes": "MOCK INSTAGRAM PUBLISH — Same as Facebook but targets the Instagram mock endpoint. Runs after Facebook. Both log to the FastAPI terminal — this is what to show in the demo video to prove the publish step worked."
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "d1acc54c-cf83-48a4-ab42-3a15c71b8553",
+      "name": "Rejected — Log and Stop",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        0,
+        144
+      ],
+      "notes": "REJECTION PATH — Sets a clear status and stops. No publish happens. You can see in the n8n execution history that this node ran, which proves the reject path worked correctly."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Generate Post Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Post Content": {
+      "main": [
+        [
+          {
+            "node": "Compose Brand Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Brand Image": {
+      "main": [
+        [
+          {
+            "node": "Request Human Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Human Approval": {
+      "main": [
+        [
+          {
+            "node": "Wait for Human Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Human Decision": {
+      "main": [
+        [
+          {
+            "node": "Was Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was Approved?": {
+      "main": [
+        [
+          {
+            "node": "Publish to Facebook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected — Log and Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish to Facebook": {
+      "main": [
+        [
+          {
+            "node": "Publish to Instagram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "8a3dc996-3f3a-427f-a857-07f9e3fe06a5",
+  "meta": {
+    "instanceId": "4acabb55794c47d2d52cec66588961dc2e180efe48605c28334c7443bbd2c650"
+  },
+  "nodeGroups": [],
+  "id": "P1kohfGTj0QxTAwc",
+  "tags": []
+}

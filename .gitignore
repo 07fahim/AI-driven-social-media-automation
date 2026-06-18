@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+backend/test_output/
+backend/output/
+backend/templates/post_template.png
+backend/templates/logo.png
+.env
+
+# Company's original assessment brief — not part of the public deliverable
+AI Engineer * Technical Assessment.md
