@@ -1,4 +1,4 @@
-# Assessment 1 — AI Agent Workflow Automation (n8n + Human-in-the-Loop)
+# AI Agent Workflow Automation (n8n + Human-in-the-Loop)
 
 AI-driven social media automation workflow with brand-consistent image compositing, LLM content generation, and a human approval gate before publishing.
 
